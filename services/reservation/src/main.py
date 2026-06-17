@@ -10,18 +10,19 @@ reservation service  /  FastAPI  /  Python 3.12
   - 暴露 /metrics Prometheus 指标端点
 """
 
-import os
+import contextlib
+import json
 import logging
+import os
 import time
-from contextlib import asynccontextmanager
 from datetime import date as date_type
 
-import redis.asyncio as aioredis
 import asyncpg
+import redis.asyncio as aioredis
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from pydantic import BaseModel, Field
-from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
 # ── 日志配置：结构化 JSON ──────────────────────────────────────────────────
 logging.basicConfig(
@@ -61,7 +62,7 @@ db_pool: asyncpg.Pool | None = None
 redis_client: aioredis.Redis | None = None
 
 
-@asynccontextmanager
+@contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期：连接数据库 & Redis；关闭时释放连接。"""
     global db_pool, redis_client
@@ -197,14 +198,13 @@ async def get_available_tables(date: str, slot: str):
     # 转换日期字符串为 date 对象（asyncpg 要求）
     try:
         parsed_date = date_type.fromisoformat(date)
-    except ValueError:
-        raise HTTPException(status_code=422, detail="日期格式错误，需为 YYYY-MM-DD")
+    except ValueError as err:
+        raise HTTPException(status_code=422, detail="日期格式错误，需为 YYYY-MM-DD") from err
 
     # 1. 尝试命中缓存
     cached = await redis_client.get(cache_key)
     if cached:
         logger.info("cache HIT key=%s", cache_key)
-        import json
         return {"source": "cache", "tables": json.loads(cached)}
 
     # 2. 缓存未命中 → 查 DB
@@ -218,7 +218,6 @@ async def get_available_tables(date: str, slot: str):
     available = [t for t in range(1, 21) if t not in booked_ids]  # 共 20 张桌
 
     # 3. 写入缓存，TTL=60 秒
-    import json
     await redis_client.setex(cache_key, 60, json.dumps(available))
 
     return {"source": "db", "tables": available}
@@ -234,8 +233,8 @@ async def create_reservation(body: ReservationRequest):
     # 检查桌位是否已被占用
     try:
         parsed_date = date_type.fromisoformat(body.date)
-    except ValueError:
-        raise HTTPException(status_code=422, detail="日期格式错误，需为 YYYY-MM-DD")
+    except ValueError as err:
+        raise HTTPException(status_code=422, detail="日期格式错误，需为 YYYY-MM-DD") from err
 
     async with db_pool.acquire() as conn:
         exists = await conn.fetchval(
@@ -285,10 +284,9 @@ def _publish_event(table_id: int, customer: str, date: str, slot: str):
     """
     try:
         from kafka import KafkaProducer
-        import json as _json
         producer = KafkaProducer(
             bootstrap_servers=KAFKA_BOOTSTRAP,
-            value_serializer=lambda v: _json.dumps(v).encode("utf-8"),
+            value_serializer=lambda v: json.dumps(v).encode("utf-8"),
         )
         producer.send("reservation.confirmed", {
             "type": "ReservationConfirmed",
