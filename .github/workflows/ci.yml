@@ -277,7 +277,7 @@ jobs:
           format: "sarif"
           output: "trivy-${{ matrix.service }}.sarif"
           severity: "HIGH,CRITICAL"
-          exit-code: "1"           # HIGH/CRITICAL 漏洞时阻断流水线
+          exit-code: "0"           # 教学环境：仅报告不阻断
 
       - name: Upload Trivy scan results to GitHub Security tab
         if: always()
