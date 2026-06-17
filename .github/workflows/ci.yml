@@ -159,6 +159,8 @@ jobs:
     name: Build Docker Images
     runs-on: ubuntu-latest
     needs: [unit-test, sast]
+    permissions:
+      packages: write
     outputs:
       reservation-image: ${{ steps.meta-reservation.outputs.tags }}
       member-image: ${{ steps.meta-member.outputs.tags }}
@@ -185,6 +187,7 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/nekocafe-reservation
           tags: |
             type=sha,prefix=sha-,format=short
+            type=raw,value=${{ github.sha }}
             type=ref,event=branch
             type=semver,pattern={{version}}
 
@@ -196,6 +199,7 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/nekocafe-member
           tags: |
             type=sha,prefix=sha-,format=short
+            type=raw,value=${{ github.sha }}
             type=ref,event=branch
             type=semver,pattern={{version}}
 
