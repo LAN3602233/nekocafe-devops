@@ -50,8 +50,13 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-          cache: "npm"
-          cache-dependency-path: services/member/package-lock.json
+
+      - name: Cache npm (member)
+        uses: actions/cache@v4
+        continue-on-error: true
+        with:
+          path: ~/.npm
+          key: npm-member-${{ hashFiles('services/member/package-lock.json') }}
 
       - name: Install Node deps (member)
         working-directory: services/member
@@ -110,8 +115,13 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-          cache: "npm"
-          cache-dependency-path: services/member/package-lock.json
+
+      - name: Cache npm (member test)
+        uses: actions/cache@v4
+        continue-on-error: true
+        with:
+          path: ~/.npm
+          key: npm-member-test-${{ hashFiles('services/member/package-lock.json') }}
 
       - name: Install member deps
         working-directory: services/member
