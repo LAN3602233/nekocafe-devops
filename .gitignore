@@ -15,7 +15,6 @@ build/
 node_modules/
 npm-debug.log*
 yarn-error.log*
-package-lock.json
 
 # ── IDE / Editor ──────────────────────────────────────────────────
 .idea/
@@ -35,6 +34,7 @@ package-lock.json
 
 # ── 测试产物 ──────────────────────────────────────────────────────
 coverage.xml
+coverage/
 .coverage
 htmlcov/
 junit.xml

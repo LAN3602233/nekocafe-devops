@@ -85,7 +85,8 @@ function createTestApp() {
   const app = express();
   app.use(express.json());
 
-  const log = {
+  // eslint-disable-next-line no-unused-vars
+  const _log = {
     info: () => {},
     warn: () => {},
     error: () => {},
@@ -95,6 +96,7 @@ function createTestApp() {
   app.use((req, res, next) => {
     const start = process.hrtime.bigint();
     res.on("finish", () => {
+      // eslint-disable-next-line no-unused-vars
       const durationMs = Number(process.hrtime.bigint() - start) / 1e9;
       // prom-client mock 自动记录
     });

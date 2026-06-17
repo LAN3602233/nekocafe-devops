@@ -213,7 +213,7 @@ async function startKafkaConsumer() {
     log.info("Kafka consumer connected and subscribed to reservation.confirmed");
 
     await consumer.run({
-      eachMessage: async ({ topic, partition, message }) => {
+      eachMessage: async ({ topic: _topic, partition: _partition, message }) => {
         const raw = message.value?.toString();
         if (!raw) return;
 
