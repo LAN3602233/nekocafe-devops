@@ -1,0 +1,29 @@
+{
+  "name": "nekocafe-member-service",
+  "version": "1.0.0",
+  "description": "NekoCafé 会员服务 — 会员注册、积分管理、Kafka 事件消费",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js",
+    "test": "jest --coverage --forceExit",
+    "test:watch": "jest --watch",
+    "lint": "eslint src/ tests/"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "pg": "^8.11.5",
+    "redis": "^4.6.13",
+    "kafkajs": "^2.2.4",
+    "prom-client": "^15.1.2"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "supertest": "^7.0.0",
+    "nodemon": "^3.1.0",
+    "eslint": "^9.2.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

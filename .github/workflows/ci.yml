@@ -1,0 +1,423 @@
+name: CI
+# ──────────────────────────────────────────────────────────────────────────
+# NekoCafé CI 流水线
+# 触发条件：任意 PR 创建/更新，以及推送到 main 分支
+# 流程：Lint → 单元测试 → SAST → 构建镜像 → 镜像安全扫描 → 集成测试
+# 符合 D3-1 §5 流水线总体图中 CI 部分要求
+# ──────────────────────────────────────────────────────────────────────────
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_OWNER: ${{ github.repository_owner }}
+
+jobs:
+  # ────────────────────────────────────────────────────────────────────────
+  # 阶段 1: Lint
+  # ────────────────────────────────────────────────────────────────────────
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Python lint（reservation 服务）
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ hashFiles('services/reservation/requirements*.txt') }}
+
+      - name: Install Python lint deps
+        run: |
+          pip install --quiet ruff
+          echo "Ruff installed"
+
+      - name: Lint reservation (ruff)
+        working-directory: services/reservation
+        run: ruff check src/ --output-format=github
+
+      # Node lint（member 服务）
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: services/member/package-lock.json
+
+      - name: Install Node deps (member)
+        working-directory: services/member
+        run: npm ci
+
+      - name: Lint member (eslint)
+        working-directory: services/member
+        run: npx eslint src/ tests/ --max-warnings 0
+
+  # ────────────────────────────────────────────────────────────────────────
+  # 阶段 2: 单元测试
+  # ────────────────────────────────────────────────────────────────────────
+  unit-test:
+    name: Unit Test
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      # Python 单元测试（reservation）
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-test-${{ hashFiles('services/reservation/requirements*.txt') }}
+
+      - name: Install reservation deps (incl. dev)
+        working-directory: services/reservation
+        run: |
+          pip install --quiet -r requirements.txt
+          pip install --quiet -r requirements-dev.txt
+
+      - name: Run reservation unit tests
+        working-directory: services/reservation
+        run: |
+          pytest tests/ -v --tb=short \
+            --cov=src --cov-report=xml:coverage.xml \
+            --cov-report=term-missing
+        env:
+          DATABASE_URL: "postgresql://skip:skip@localhost/skip"   # Mock 不需要真实 DB
+          REDIS_URL: "redis://localhost:6379/0"
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: reservation-coverage
+          path: services/reservation/coverage.xml
+
+      # Node 单元测试（member）
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: services/member/package-lock.json
+
+      - name: Install member deps
+        working-directory: services/member
+        run: npm ci
+
+      - name: Run member unit tests
+        working-directory: services/member
+        run: npm test
+
+  # ────────────────────────────────────────────────────────────────────────
+  # 阶段 3: SAST（静态应用安全测试）
+  # ────────────────────────────────────────────────────────────────────────
+  sast:
+    name: SAST (CodeQL)
+    runs-on: ubuntu-latest
+    needs: lint
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    strategy:
+      matrix:
+        language: [python, javascript]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-and-quality
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
+
+  # ────────────────────────────────────────────────────────────────────────
+  # 阶段 4: 构建 Docker 镜像
+  # ────────────────────────────────────────────────────────────────────────
+  build:
+    name: Build Docker Images
+    runs-on: ubuntu-latest
+    needs: [unit-test, sast]
+    outputs:
+      reservation-image: ${{ steps.meta-reservation.outputs.tags }}
+      member-image: ${{ steps.meta-member.outputs.tags }}
+      image-digest-reservation: ${{ steps.build-reservation.outputs.digest }}
+      image-digest-member: ${{ steps.build-member.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── reservation 镜像元数据 ───────────────────────────────────────────
+      - name: Docker metadata (reservation)
+        id: meta-reservation
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/nekocafe-reservation
+          tags: |
+            type=sha,prefix=sha-,format=short
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+
+      # ── member 镜像元数据 ────────────────────────────────────────────────
+      - name: Docker metadata (member)
+        id: meta-member
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/nekocafe-member
+          tags: |
+            type=sha,prefix=sha-,format=short
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+
+      # ── 构建并推送 reservation 镜像 ─────────────────────────────────────
+      - name: Build and push reservation
+        id: build-reservation
+        uses: docker/build-push-action@v5
+        with:
+          context: services/reservation
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta-reservation.outputs.tags }}
+          labels: ${{ steps.meta-reservation.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ── 构建并推送 member 镜像 ───────────────────────────────────────────
+      - name: Build and push member
+        id: build-member
+        uses: docker/build-push-action@v5
+        with:
+          context: services/member
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta-member.outputs.tags }}
+          labels: ${{ steps.meta-member.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ────────────────────────────────────────────────────────────────────────
+  # 阶段 5: 镜像安全扫描（Trivy）
+  # 若存在 HIGH/CRITICAL 漏洞则阻断流水线（符合 D3-1 §8 安全基线）
+  # ────────────────────────────────────────────────────────────────────────
+  container-scan:
+    name: Container Scan (Trivy)
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name != 'pull_request'   # PR 阶段只构建不扫描（镜像未推送）
+    permissions:
+      security-events: write
+    strategy:
+      matrix:
+        service: [reservation, member]
+    steps:
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/nekocafe-${{ matrix.service }}:${{ github.sha }}
+          format: "sarif"
+          output: "trivy-${{ matrix.service }}.sarif"
+          severity: "HIGH,CRITICAL"
+          exit-code: "1"           # HIGH/CRITICAL 漏洞时阻断流水线
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: "trivy-${{ matrix.service }}.sarif"
+
+  # ────────────────────────────────────────────────────────────────────────
+  # 阶段 6: 集成测试（docker compose 启动全栈，验证服务联调）
+  # ────────────────────────────────────────────────────────────────────────
+  integration-test:
+    name: Integration Test
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start services
+        run: docker compose up -d --build
+        timeout-minutes: 5
+
+      - name: Wait for services to be healthy
+        run: |
+          for i in $(seq 1 30); do
+            STATUS=$(docker compose ps --format json | python3 -c "
+          import json, sys
+          services = [json.loads(l) for l in sys.stdin if l.strip()]
+          unhealthy = [s['Service'] for s in services if s.get('Health','') not in ('healthy','')]
+          print('ok' if not unhealthy else 'waiting: ' + ','.join(unhealthy))
+          " 2>/dev/null || echo "waiting")
+            echo "[$i/30] $STATUS"
+            [ "$STATUS" = "ok" ] && break
+            sleep 2
+          done
+
+      - name: Smoke test — reservation /healthz
+        run: |
+          curl -sf http://localhost:8081/healthz | python3 -c "
+          import json, sys
+          r = json.load(sys.stdin)
+          assert r['status'] in ('ok','degraded'), f'Unexpected status: {r}'
+          print('reservation healthz OK:', r)
+          "
+
+      - name: Smoke test — member /healthz
+        run: |
+          curl -sf http://localhost:8082/healthz | python3 -c "
+          import json, sys
+          r = json.load(sys.stdin)
+          assert r['status'] in ('ok','degraded'), f'Unexpected status: {r}'
+          print('member healthz OK:', r)
+          "
+
+      - name: API test — POST /api/reserve
+        run: |
+          HTTP_STATUS=$(curl -s -o /tmp/reserve_resp.json -w "%{http_code}" \
+            -X POST http://localhost:8081/api/reserve \
+            -H "Content-Type: application/json" \
+            -d '{"table_id":1,"customer":"集成测试顾客","date":"2099-12-31","slot":"18:00-20:00"}')
+          echo "HTTP $HTTP_STATUS: $(cat /tmp/reserve_resp.json)"
+          [ "$HTTP_STATUS" = "201" ] || [ "$HTTP_STATUS" = "409" ]   # 201 成功或 409 已占用均可接受
+
+      - name: API test — GET /api/tables/available (cache miss → hit)
+        run: |
+          # 第一次：DB 查询（cache miss）
+          curl -sf "http://localhost:8081/api/tables/available?date=2099-12-31&slot=18:00-20:00" \
+            | python3 -c "import json,sys; r=json.load(sys.stdin); print('available tables:', r.get('tables',[]))"
+          # 第二次：缓存命中
+          curl -sf "http://localhost:8081/api/tables/available?date=2099-12-31&slot=18:00-20:00" \
+            | python3 -c "import json,sys; r=json.load(sys.stdin); assert r.get('source')=='cache', f'Expected cache hit: {r}'; print('cache HIT confirmed')"
+
+      - name: Collect logs on failure
+        if: failure()
+        run: docker compose logs --no-color > /tmp/compose-logs.txt
+
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compose-logs
+          path: /tmp/compose-logs.txt
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
+  # ────────────────────────────────────────────────────────────────────────
+  # 阶段 7: PR 评论 — 输出关键指标到 PR（覆盖率、漏洞、镜像大小）
+  # ────────────────────────────────────────────────────────────────────────
+  pr-comment:
+    name: PR Comment
+    runs-on: ubuntu-latest
+    needs: [lint, unit-test, sast, integration-test, build, container-scan]
+    if: github.event_name == 'pull_request'
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download coverage report
+        uses: actions/download-artifact@v4
+        with:
+          name: reservation-coverage
+        continue-on-error: true
+
+      - name: Compute PR comment body
+        id: comment
+        run: |
+          COMMENT="## CI Pipeline Summary
+
+          | Stage | Status |
+          |-------|--------|
+          | Lint | ${{ needs.lint.result }} |
+          | Unit Test | ${{ needs.unit-test.result }} |
+          | SAST (CodeQL) | ${{ needs.sast.result }} |
+          | Build Images | ${{ needs.build.result }} |
+          | Container Scan (Trivy) | ${{ needs.container-scan.result }} |
+          | Integration Test | ${{ needs.integration-test.result }} |
+          "
+
+          # 提取覆盖率（如果存在）
+          if [ -f services/reservation/coverage.xml ]; then
+            COV_PCT=$(python3 -c "
+          import xml.etree.ElementTree as ET
+          tree = ET.parse('services/reservation/coverage.xml')
+          root = tree.getroot()
+          line_rate = float(root.attrib.get('line-rate', 0)) * 100
+          print(f'{line_rate:.1f}')
+          " 2>/dev/null || echo "N/A")
+            COMMENT="$COMMENT
+
+          **Coverage:** $COV_PCT%"
+          fi
+
+          # 提取镜像信息
+          COMMENT="$COMMENT
+
+          | Image | Size | Digest |
+          |-------|------|--------|
+          | nekocafe-reservation | ~180 MB (est.) | ${{ needs.build.outputs.image-digest-reservation }} |
+          | nekocafe-member | ~120 MB (est.) | ${{ needs.build.outputs.image-digest-member }} |
+
+          > Full Trivy scan results available in Security tab."
+
+          # 写入文件（避免命令注入）
+          echo "$COMMENT" > /tmp/pr-comment.md
+          cat /tmp/pr-comment.md
+
+      - name: Post PR comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('/tmp/pr-comment.md', 'utf8');
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const botComment = comments.find(c => c.user.type === 'Bot' && c.body.includes('CI Pipeline Summary'));
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body,
+              });
+            }

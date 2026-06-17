@@ -1,0 +1,102 @@
+# ────────────────────────────────────────────────────────────────────────
+# NekoCafé — Prometheus 告警规则
+# 与 D3-1 §6.2 自动回滚阈值完全对齐
+# ────────────────────────────────────────────────────────────────────────
+
+groups:
+  - name: nekocafe-reservation
+    rules:
+      # ── 告警 1：预约接口 HTTP 5xx 错误率 > 1%（触发自动回滚）─────
+      - alert: ReservationHighErrorRate
+        expr: |
+          (
+            sum(rate(reservation_requests_total{status=~"5.."}[2m])) by (service)
+            /
+            sum(rate(reservation_requests_total[2m])) by (service)
+          ) > 0.01
+        for: 1m
+        labels:
+          severity: critical
+          service: reservation
+          action: auto_rollback
+        annotations:
+          summary: "预约服务 5xx 错误率超过 1%"
+          description: "预约服务 5xx 错误率为 {{ $value | humanizePercentage }}，超过阈值 1%，将触发自动回滚"
+          runbook_url: "https://github.com/nekocafe/nekocafe/blob/main/docs/runbook.md#场景-a预约服务-http-5xx-错误率--1"
+
+      # ── 告警 2：/api/reserve P95 延迟 > 300ms ────────────────────
+      - alert: ReservationHighLatency
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(reservation_request_latency_seconds_bucket{endpoint="/api/reserve"}[2m])) by (le, service)
+          ) > 0.3
+        for: 2m
+        labels:
+          severity: warning
+          service: reservation
+          action: auto_rollback
+        annotations:
+          summary: "预约接口 P95 延迟超过 300ms"
+          description: "POST /api/reserve P95 延迟为 {{ $value | humanizeDuration }}，超过阈值 300ms"
+          runbook_url: "https://github.com/nekocafe/nekocafe/blob/main/docs/runbook.md#场景-b预约接口-p95-延迟--300ms"
+
+      # ── 告警 3：CPU 限流率 > 20% ──────────────────────────────────
+      - alert: ReservationCpuThrottling
+        expr: |
+          (
+            rate(container_cpu_cfs_throttled_seconds_total{container=~"nekocafe-reservation.*"}[3m])
+            /
+            rate(container_cpu_usage_seconds_total{container=~"nekocafe-reservation.*"}[3m])
+          ) > 0.2
+        for: 3m
+        labels:
+          severity: warning
+          service: reservation
+          action: scale_up
+        annotations:
+          summary: "预约服务 CPU 限流率超过 20%"
+          description: "预约服务 CPU 限流率为 {{ $value | humanizePercentage }}，可能需扩容或调整资源限制"
+          runbook_url: "https://github.com/nekocafe/nekocafe/blob/main/docs/runbook.md#场景-ccpu-限流率--20%throttlinghigh"
+
+  - name: nekocafe-member
+    rules:
+      # ── 会员服务高错误率 ────────────────────────────────────────
+      - alert: MemberHighErrorRate
+        expr: |
+          (
+            sum(rate(member_requests_total{status=~"5.."}[2m])) by (service)
+            /
+            sum(rate(member_requests_total[2m])) by (service)
+          ) > 0.01
+        for: 2m
+        labels:
+          severity: critical
+          service: member
+        annotations:
+          summary: "会员服务 5xx 错误率超过 1%"
+          description: "会员服务 5xx 错误率为 {{ $value | humanizePercentage }}"
+
+  - name: nekocafe-infra
+    rules:
+      # ── Kafka 消费者 lag 过高 ───────────────────────────────────
+      - alert: KafkaConsumerLagHigh
+        expr: kafka_consumer_group_lag_sum{topic="reservation.confirmed",consumergroup="member-service-group"} > 1000
+        for: 5m
+        labels:
+          severity: warning
+          service: kafka
+        annotations:
+          summary: "Kafka 消费者 lag 超过 1000"
+          description: "reservation.confirmed topic consumer lag 为 {{ $value }}，可能需要扩容 consumer 或排查消费异常"
+          runbook_url: "https://github.com/nekocafe/nekocafe/blob/main/docs/runbook.md#场景-dkafka-消息积压consumerlag-过高"
+
+      # ── 数据库连接数过高 ─────────────────────────────────────────
+      - alert: PostgresHighConnections
+        expr: pg_stat_database_numbackends{datname=~"reservation_db|member_db"} > 50
+        for: 5m
+        labels:
+          severity: warning
+          service: postgres
+        annotations:
+          summary: "数据库连接数超过 50"
+          description: "数据库 {{ $labels.datname }} 当前连接数 {{ $value }}，可能连接池耗尽"

@@ -1,0 +1,51 @@
+# ──────────────────────────────────────────────────────────────────────────
+# Dev 环境覆盖值
+# 用途：PR 合并前自动部署，开发自测
+# 部署命令：
+#   helm upgrade --install nekocafe-reservation ./infra/helm -n dev --create-namespace -f ./infra/helm/values-dev.yaml --set serviceType=reservation --set image.tag=sha-<commit>
+# ──────────────────────────────────────────────────────────────────────────
+
+replicaCount: 1
+
+image:
+  pullPolicy: Always
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 256Mi
+
+hpa:
+  enabled: false        # Dev 环境不需要自动伸缩
+
+canary:
+  enabled: false
+
+ingress:
+  enabled: true
+  host: dev.nekocafe.internal
+  tls:
+    enabled: false
+
+env:
+  DATABASE_URL: "postgresql://nekocafe:nekocafe@postgres:5432/placeholder_db"
+  REDIS_URL: "redis://redis:6379/0"
+  KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+  PORT: "8080"
+
+pdb:
+  enabled: false
+
+probe:
+  liveness:
+    initialDelaySeconds: 45
+    failureThreshold: 5
+  readiness:
+    initialDelaySeconds: 10
+
+serviceMonitor:
+  enabled: false        # Dev 环境不需要 Prometheus 采集
+  interval: 60s

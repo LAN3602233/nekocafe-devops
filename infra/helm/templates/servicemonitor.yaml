@@ -1,0 +1,26 @@
+{{/* ────────────────────────────────────────────────────────────────────────
+Prometheus ServiceMonitor 模板
+  - 仅在 serviceMonitor.enabled=true 且集群安装了 Prometheus Operator 时生效
+─────────────────────────────────────────────────────────────────────── */}}
+{{- if .Values.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ .Release.Name }}-monitor
+  labels:
+    app: {{ .Release.Name }}
+    service: {{ .Values.serviceType }}
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  endpoints:
+    - port: {{ .Values.service.name }}
+      path: {{ .Values.serviceMonitor.path }}
+      interval: {{ .Values.serviceMonitor.interval }}
+      scrapeTimeout: 10s
+{{- end }}

@@ -1,0 +1,51 @@
+# .gitignore — NekoCafé
+
+# ── Python ────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+*.egg
+*.so
+
+# ── Node.js ───────────────────────────────────────────────────────
+node_modules/
+npm-debug.log*
+yarn-error.log*
+package-lock.json
+
+# ── IDE / Editor ──────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ── Docker ────────────────────────────────────────────────────────
+.docker/
+
+# ── 环境变量（Secret 严禁提交！符合 D3-1 §8 要求）───────────────
+.env
+.env.*
+!.env.example
+
+# ── 测试产物 ──────────────────────────────────────────────────────
+coverage.xml
+.coverage
+htmlcov/
+junit.xml
+
+# ── Helm 打包产物 ─────────────────────────────────────────────────
+*.tgz
+charts/*.tgz
+
+# ── Trivy 扫描结果 ────────────────────────────────────────────────
+*.sarif
+
+# ── 本地配置覆盖 ──────────────────────────────────────────────────
+docker-compose.override.yml
+kubeconfig

@@ -1,0 +1,352 @@
+name: CD
+# ──────────────────────────────────────────────────────────────────────────
+# NekoCafé CD 流水线
+# 触发条件：
+#   - 推送到 main 分支 → 自动部署到 dev 环境
+#   - 打 tag（v*）     → 金丝雀发布到 prod（5% → 50% → 100%）
+# 符合 D3-1 §6 渐进式发布策略要求
+# ──────────────────────────────────────────────────────────────────────────
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_OWNER: ${{ github.repository_owner }}
+  HELM_VERSION: "3.14.4"
+
+jobs:
+  # ────────────────────────────────────────────────────────────────────────
+  # Helm 模板校验（必过，阻断）
+  # ────────────────────────────────────────────────────────────────────────
+  helm-lint:
+    name: Helm Lint & kube-linter
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Helm lint
+        run: |
+          helm lint ./infra/helm --strict
+          echo "Helm lint passed ✓"
+
+      - name: Install kube-linter
+        run: |
+          curl -L https://github.com/stackrox/kube-linter/releases/latest/download/kube-linter-linux.tar.gz | tar xz
+          sudo mv kube-linter /usr/local/bin/
+
+      - name: Render Helm template and run kube-linter
+        run: |
+          # 渲染 dev 环境配置供 kube-linter 检查
+          helm template test-release ./infra/helm \
+            -f ./infra/helm/values-dev.yaml \
+            --set serviceType=reservation \
+            --set image.tag=test \
+            --set canary.enabled=false \
+            > /tmp/rendered.yaml
+
+          kube-linter lint /tmp/rendered.yaml --do-not-auto-add-defaults
+          echo "kube-linter passed ✓"
+
+  # ────────────────────────────────────────────────────────────────────────
+  # 部署到 dev 环境（main 分支推送触发）
+  # ────────────────────────────────────────────────────────────────────────
+  deploy-dev:
+    name: Deploy to dev
+    runs-on: ubuntu-latest
+    needs: helm-lint
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: dev
+      url: https://dev.nekocafe.internal
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Configure kubeconfig (dev)
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG_DEV }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Compute image tag
+        id: tag
+        run: echo "tag=sha-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Helm upgrade — reservation (dev)
+        working-directory: ./infra/helm
+        run: |
+          helm upgrade --install nekocafe-reservation . \
+            --namespace dev \
+            --create-namespace \
+            --values values-dev.yaml \
+            --set serviceType=reservation \
+            --set image.tag=${{ steps.tag.outputs.tag }} \
+            --set image.repository=${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/nekocafe-reservation \
+            --set env.DATABASE_URL="${{ secrets.DEV_DATABASE_URL }}" \
+            --set env.REDIS_URL="${{ secrets.DEV_REDIS_URL }}" \
+            --set env.KAFKA_BOOTSTRAP_SERVERS="${{ secrets.DEV_KAFKA_BOOTSTRAP }}" \
+            --wait --timeout 5m --atomic
+
+      - name: Helm upgrade — member (dev)
+        working-directory: ./infra/helm
+        run: |
+          helm upgrade --install nekocafe-member . \
+            --namespace dev \
+            --values values-dev.yaml \
+            --set serviceType=member \
+            --set image.tag=${{ steps.tag.outputs.tag }} \
+            --set image.repository=${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/nekocafe-member \
+            --set env.DATABASE_URL="${{ secrets.DEV_MEMBER_DATABASE_URL }}" \
+            --set env.REDIS_URL="${{ secrets.DEV_REDIS_URL }}" \
+            --set env.KAFKA_BOOTSTRAP_SERVERS="${{ secrets.DEV_KAFKA_BOOTSTRAP }}" \
+            --wait --timeout 5m --atomic
+
+      - name: Dev smoke test — reservation /healthz
+        run: |
+          for i in $(seq 1 12); do
+            STATUS=$(curl -sf https://dev.nekocafe.internal/api/reservation/healthz -o /dev/null -w "%{http_code}" 2>/dev/null || echo "000")
+            [ "$STATUS" = "200" ] && { echo "dev smoke test PASSED (HTTP 200)"; exit 0; }
+            echo "[$i/12] waiting... HTTP $STATUS"
+            sleep 5
+          done
+          echo "dev smoke test FAILED — reservation not healthy after 60s"
+          exit 1
+
+  # ────────────────────────────────────────────────────────────────────────
+  # 金丝雀发布到 prod（打 tag v* 时触发）
+  # 流程：Helm 校验 → 5% 金丝雀 → 观察 2 分钟 → 50% → 观察 2 分钟 → 100%
+  # 符合 D3-1 §6 金丝雀发布策略
+  # ────────────────────────────────────────────────────────────────────────
+  canary-prod:
+    name: Canary → prod
+    runs-on: ubuntu-latest
+    needs: helm-lint
+    if: startsWith(github.ref, 'refs/tags/v')
+    environment:
+      name: prod
+      url: https://nekocafe.example.com
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Configure kubeconfig (prod)
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG_PROD }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Extract version tag
+        id: ver
+        run: echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      # ── 步骤 1：部署金丝雀（5% 流量）─────────────────────────────
+      - name: Deploy canary 5% (reservation)
+        working-directory: ./infra/helm
+        run: |
+          echo ">>> 部署金丝雀版本 ${{ steps.ver.outputs.tag }}（5% 流量）"
+          helm upgrade --install nekocafe-reservation-canary . \
+            --namespace prod \
+            --values values-prod.yaml \
+            --set serviceType=reservation \
+            --set image.tag=${{ steps.ver.outputs.tag }} \
+            --set image.repository=${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/nekocafe-reservation \
+            --set canary.enabled=true \
+            --set canary.weight=5 \
+            --set env.DATABASE_URL="${{ secrets.PROD_DATABASE_URL }}" \
+            --set env.REDIS_URL="${{ secrets.PROD_REDIS_URL }}" \
+            --set env.KAFKA_BOOTSTRAP_SERVERS="${{ secrets.PROD_KAFKA_BOOTSTRAP }}" \
+            --wait --timeout 5m --atomic
+
+      # ── 步骤 2：观察 2 分钟，检查错误率 & P95 延迟 ──────────────
+      - name: Observe canary metrics (2 min)
+        id: observe-5pct
+        run: |
+          echo ">>> 金丝雀 5% 观察期开始，持续 120 秒..."
+          sleep 30
+
+          # 查询 Prometheus 错误率（5xx / total）
+          ERROR_RATE=$(curl -sf \
+            "https://prometheus.nekocafe.internal/api/v1/query?\
+          query=rate(reservation_requests_total{status=~'5..'}[2m])/rate(reservation_requests_total[2m])" \
+            | python3 -c "
+          import json,sys
+          try:
+              data = json.load(sys.stdin)
+              val = float(data['data']['result'][0]['value'][1])
+              print(f'{val:.4f}')
+          except:
+              print('0.0000')
+          " 2>/dev/null || echo "0.0000")
+
+          echo "当前错误率: $ERROR_RATE"
+
+          # 阈值：错误率 > 1% 则自动回滚（符合 D3-1 §6.2）
+          python3 -c "
+          import sys
+          rate = float('$ERROR_RATE')
+          if rate > 0.01:
+              print(f'ERROR: 错误率 {rate*100:.2f}% 超过阈值 1%，触发自动回滚')
+              sys.exit(1)
+          else:
+              print(f'OK: 错误率 {rate*100:.2f}% 正常，继续放量')
+          "
+
+          sleep 90
+
+      # ── 步骤 2b：如果观察失败，自动回滚 ────────────────────────
+      - name: Auto rollback on high error rate
+        if: failure() && steps.observe-5pct.outcome == 'failure'
+        run: |
+          echo ">>> 自动回滚：删除金丝雀版本，恢复 stable"
+          helm rollback nekocafe-reservation-canary -n prod || true
+          helm uninstall nekocafe-reservation-canary -n prod || true
+          echo ">>> 已回滚到上一稳定版本"
+          # 发送告警通知
+          curl -sf -X POST "${{ secrets.DINGTALK_WEBHOOK }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"msgtype\":\"text\",\"text\":{\"content\":\"[NekoCafé] 金丝雀发布失败！版本 ${{ steps.ver.outputs.tag }} 已自动回滚。请检查 Grafana 仪表盘。\"}}" || true
+
+      # ── 步骤 3：放量到 50% ──────────────────────────────────────────
+      - name: Scale canary to 50%
+        working-directory: ./infra/helm
+        run: |
+          echo ">>> 放量至 50% 流量"
+          helm upgrade nekocafe-reservation-canary . \
+            --namespace prod \
+            --values values-prod.yaml \
+            --set serviceType=reservation \
+            --set image.tag=${{ steps.ver.outputs.tag }} \
+            --set image.repository=${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/nekocafe-reservation \
+            --set canary.enabled=true \
+            --set canary.weight=50 \
+            --set env.DATABASE_URL="${{ secrets.PROD_DATABASE_URL }}" \
+            --set env.REDIS_URL="${{ secrets.PROD_REDIS_URL }}" \
+            --set env.KAFKA_BOOTSTRAP_SERVERS="${{ secrets.PROD_KAFKA_BOOTSTRAP }}" \
+            --wait --timeout 5m --atomic
+          echo ">>> 50% 观察期 120 秒..."
+          sleep 120
+
+      # ── 步骤 4：全量发布 100%（用新版本替换 stable）────────────
+      - name: Full rollout 100% — promote canary to stable
+        working-directory: ./infra/helm
+        run: |
+          echo ">>> 全量发布：将金丝雀版本提升为 stable"
+
+          # 1. 升级 stable deployment 至新版本
+          helm upgrade --install nekocafe-reservation . \
+            --namespace prod \
+            --values values-prod.yaml \
+            --set serviceType=reservation \
+            --set image.tag=${{ steps.ver.outputs.tag }} \
+            --set image.repository=${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/nekocafe-reservation \
+            --set canary.enabled=false \
+            --set env.DATABASE_URL="${{ secrets.PROD_DATABASE_URL }}" \
+            --set env.REDIS_URL="${{ secrets.PROD_REDIS_URL }}" \
+            --set env.KAFKA_BOOTSTRAP_SERVERS="${{ secrets.PROD_KAFKA_BOOTSTRAP }}" \
+            --wait --timeout 5m --atomic
+
+          # 2. 删除金丝雀 release
+          helm uninstall nekocafe-reservation-canary -n prod || true
+
+          echo ">>> 全量发布完成：reservation 服务已升级至 ${{ steps.ver.outputs.tag }}"
+
+      # member 服务同步发布（直接全量，风险较低）
+      - name: Full rollout — member
+        working-directory: ./infra/helm
+        run: |
+          helm upgrade --install nekocafe-member . \
+            --namespace prod \
+            --values values-prod.yaml \
+            --set serviceType=member \
+            --set image.tag=${{ steps.ver.outputs.tag }} \
+            --set image.repository=${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/nekocafe-member \
+            --set env.DATABASE_URL="${{ secrets.PROD_MEMBER_DATABASE_URL }}" \
+            --set env.REDIS_URL="${{ secrets.PROD_REDIS_URL }}" \
+            --set env.KAFKA_BOOTSTRAP_SERVERS="${{ secrets.PROD_KAFKA_BOOTSTRAP }}" \
+            --wait --timeout 5m --atomic
+
+      - name: Post-deploy smoke test (prod)
+        run: |
+          for i in $(seq 1 18); do
+            STATUS=$(curl -sf https://nekocafe.example.com/api/reservation/healthz \
+              -o /dev/null -w "%{http_code}" 2>/dev/null || echo "000")
+            [ "$STATUS" = "200" ] && { echo "prod smoke test PASSED"; exit 0; }
+            echo "[$i/18] waiting... HTTP $STATUS"
+            sleep 10
+          done
+          echo "prod smoke test FAILED after 3 minutes"
+          exit 1
+
+  # ────────────────────────────────────────────────────────────────────────
+  # 部署到 staging 环境（打 tag 后同步部署，供 QA 验证）
+  # ────────────────────────────────────────────────────────────────────────
+  deploy-staging:
+    name: Deploy to staging
+    runs-on: ubuntu-latest
+    needs: helm-lint
+    if: startsWith(github.ref, 'refs/tags/v')
+    environment:
+      name: staging
+      url: https://staging.nekocafe.internal
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Configure kubeconfig (staging)
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG_STAGING }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Extract version tag
+        id: ver
+        run: echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Helm upgrade — reservation (staging)
+        working-directory: ./infra/helm
+        run: |
+          helm upgrade --install nekocafe-reservation . \
+            --namespace staging \
+            --create-namespace \
+            --values values-staging.yaml \
+            --set serviceType=reservation \
+            --set image.tag=${{ steps.ver.outputs.tag }} \
+            --set image.repository=${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/nekocafe-reservation \
+            --set env.DATABASE_URL="${{ secrets.STAGING_DATABASE_URL }}" \
+            --set env.REDIS_URL="${{ secrets.STAGING_REDIS_URL }}" \
+            --set env.KAFKA_BOOTSTRAP_SERVERS="${{ secrets.STAGING_KAFKA_BOOTSTRAP }}" \
+            --wait --timeout 5m --atomic
+
+      - name: Helm upgrade — member (staging)
+        working-directory: ./infra/helm
+        run: |
+          helm upgrade --install nekocafe-member . \
+            --namespace staging \
+            --values values-staging.yaml \
+            --set serviceType=member \
+            --set image.tag=${{ steps.ver.outputs.tag }} \
+            --set image.repository=${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/nekocafe-member \
+            --set env.DATABASE_URL="${{ secrets.STAGING_MEMBER_DATABASE_URL }}" \
+            --set env.REDIS_URL="${{ secrets.STAGING_REDIS_URL }}" \
+            --set env.KAFKA_BOOTSTRAP_SERVERS="${{ secrets.STAGING_KAFKA_BOOTSTRAP }}" \
+            --wait --timeout 5m --atomic

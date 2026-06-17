@@ -1,0 +1,29 @@
+# Docker build context 排除列表
+# 避免将本地开发文件、测试产物、虚拟环境复制到镜像中
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+
+# Git
+.git/
+
+# 测试
+tests/
+
+# 文档
+*.md
+!README.md
+
+# 开发依赖文件
+requirements-dev.txt

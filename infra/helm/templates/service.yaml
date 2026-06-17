@@ -1,0 +1,26 @@
+{{/* ────────────────────────────────────────────────────────────────────────
+Service 模板
+─────────────────────────────────────────────────────────────────────── */}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-svc
+  labels:
+    app: {{ .Release.Name }}
+    service: {{ .Values.serviceType }}
+  annotations:
+    prometheus.io/scrape: {{ .Values.serviceMonitor.enabled | quote }}
+    prometheus.io/path: {{ .Values.serviceMonitor.path }}
+    prometheus.io/port: {{ .Values.service.port | quote }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    app: {{ .Release.Name }}
+    {{- if .Values.canary.enabled }}
+    canary: "true"
+    {{- end }}
+  ports:
+    - name: {{ .Values.service.name }}
+      port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.port }}
+      protocol: TCP

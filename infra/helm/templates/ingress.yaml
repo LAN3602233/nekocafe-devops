@@ -1,0 +1,96 @@
+{{/* ────────────────────────────────────────────────────────────────────────
+Ingress 模板 — 支持金丝雀流量切分 (nginx-ingress canary annotations)
+
+金丝雀使用规则：
+  - 正常 release: canary.enabled=false → 标准 Ingress
+  - 金丝雀 release: canary.enabled=true + canary.weight → 金丝雀 Ingress
+    通过 nginx.ingress.kubernetes.io/canary-weight 控制流量比例
+    符合 D3-1 §6 金丝雀发布策略
+─────────────────────────────────────────────────────────────────────── */}}
+{{- if .Values.ingress.enabled }}
+{{- if .Values.canary.enabled }}
+---
+# ── 金丝雀 Ingress（独立 Helm release）──────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ .Release.Name }}-canary
+  labels:
+    app: {{ .Release.Name }}
+    service: {{ .Values.serviceType }}
+    canary: "true"
+  annotations:
+    kubernetes.io/ingress.class: {{ .Values.ingress.className }}
+    nginx.ingress.kubernetes.io/canary: "true"
+    nginx.ingress.kubernetes.io/canary-weight: {{ .Values.canary.weight | quote }}
+    nginx.ingress.kubernetes.io/canary-by-header: "x-canary"
+    nginx.ingress.kubernetes.io/canary-by-header-value: "v{{ .Values.image.tag }}"
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  tls:
+    {{- if .Values.ingress.tls.enabled }}
+    - hosts:
+        - {{ .Values.ingress.host }}
+      secretName: {{ .Values.ingress.tls.secretName }}
+    {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host }}
+      http:
+        paths:
+          - path: /api/{{ .Values.serviceType }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .Release.Name }}-svc
+                port:
+                  number: {{ .Values.service.port }}
+          - path: /healthz
+            pathType: Exact
+            backend:
+              service:
+                name: {{ .Release.Name }}-svc
+                port:
+                  number: {{ .Values.service.port }}
+{{- else }}
+---
+# ── 标准 Ingress ────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ .Release.Name }}-ingress
+  labels:
+    app: {{ .Release.Name }}
+    service: {{ .Values.serviceType }}
+  annotations:
+    kubernetes.io/ingress.class: {{ .Values.ingress.className }}
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "30"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "30"
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  tls:
+    {{- if .Values.ingress.tls.enabled }}
+    - hosts:
+        - {{ .Values.ingress.host }}
+      secretName: {{ .Values.ingress.tls.secretName }}
+    {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host }}
+      http:
+        paths:
+          - path: /api/{{ .Values.serviceType }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .Release.Name }}-svc
+                port:
+                  number: {{ .Values.service.port }}
+          - path: /healthz
+            pathType: Exact
+            backend:
+              service:
+                name: {{ .Release.Name }}-svc
+                port:
+                  number: {{ .Values.service.port }}
+{{- end }}
+{{- end }}

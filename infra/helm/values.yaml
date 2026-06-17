@@ -1,0 +1,99 @@
+# ──────────────────────────────────────────────────────────────────────────
+# NekoCafé Helm Chart — 默认值
+# 各环境覆盖文件：values-dev.yaml / values-staging.yaml / values-prod.yaml
+# ──────────────────────────────────────────────────────────────────────────
+
+# ── 服务类型：reservation | member ────────────────────────────────────────
+serviceType: reservation
+
+# ── 副本数 ────────────────────────────────────────────────────────────────
+replicaCount: 2
+
+# ── 镜像配置 ──────────────────────────────────────────────────────────────
+image:
+  repository: ghcr.io/nekocafe/nekocafe-reservation
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+# ── Service 配置 ──────────────────────────────────────────────────────────
+service:
+  type: ClusterIP
+  port: 8080
+  name: http
+
+# ── 资源限制 ──────────────────────────────────────────────────────────────
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# ── HPA 自动伸缩 ──────────────────────────────────────────────────────────
+hpa:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 8
+  targetCPUUtilization: 70
+
+# ── 金丝雀发布（仅 reservation 服务使用）─────────────────────────────────
+canary:
+  enabled: false
+  weight: 0          # 金丝雀流量权重：0-100
+
+# ── Ingress ───────────────────────────────────────────────────────────────
+ingress:
+  enabled: true
+  className: nginx
+  host: nekocafe.local
+  tls:
+    enabled: false
+    secretName: ""
+
+# ── 环境变量（Secret 通过 GitHub Secrets 注入，此处为默认值）────────────
+env:
+  DATABASE_URL: "postgresql://nekocafe:nekocafe@postgres:5432/placeholder_db"
+  REDIS_URL: "redis://redis:6379/0"
+  KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+  PORT: "8080"
+
+# ── PodDisruptionBudget ───────────────────────────────────────────────────
+pdb:
+  enabled: true
+  minAvailable: 1
+
+# ── 健康检查探针 ──────────────────────────────────────────────────────────
+probe:
+  liveness:
+    path: /healthz
+    port: 8080
+    initialDelaySeconds: 30
+    periodSeconds: 15
+    timeoutSeconds: 5
+    failureThreshold: 3
+  readiness:
+    path: /healthz
+    port: 8080
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+
+# ── 安全上下文 ────────────────────────────────────────────────────────────
+security:
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  runAsNonRoot: true
+
+# ── Prometheus ServiceMonitor ─────────────────────────────────────────────
+serviceMonitor:
+  enabled: true
+  interval: 30s
+  path: /metrics
+
+# ── NodeSelector / Tolerations / Affinity ─────────────────────────────────
+nodeSelector: {}
+tolerations: []
+affinity: {}

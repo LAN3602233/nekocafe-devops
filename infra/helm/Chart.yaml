@@ -1,0 +1,15 @@
+apiVersion: v2
+name: nekocafe
+version: 0.1.0
+appVersion: "1.0.0"
+description: NekoCafé 猫咪主题餐饮预约平台 — Helm Chart（含 reservation / member 两个微服务）
+type: application
+keywords:
+  - microservices
+  - fastapi
+  - express
+  - kafka
+  - postgresql
+  - redis
+maintainers:
+  - name: NekoCafé DevOps Team

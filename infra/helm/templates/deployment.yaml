@@ -1,0 +1,114 @@
+{{/* ────────────────────────────────────────────────────────────────────────
+Deployment 模板 — 支持金丝雀发布
+  - canary.enabled=false: 标准 Deployment
+  - canary.enabled=true:  金丝雀 Deployment（独立 Helm release）
+  符合 D3-1 §6 渐进式发布策略要求
+─────────────────────────────────────────────────────────────────────── */}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    app: {{ .Release.Name }}
+    service: {{ .Values.serviceType }}
+    {{- if .Values.canary.enabled }}
+    canary: "true"
+    weight: {{ .Values.canary.weight | quote }}
+    {{- end }}
+  annotations:
+    helm.sh/revision: {{ .Release.Revision | quote }}
+    {{- if .Values.canary.enabled }}
+    canary.weight: {{ .Values.canary.weight | quote }}
+    {{- end }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  {{- if .Values.canary.enabled }}
+  replicas: 2  {{/* 金丝雀固定 2 副本，权重在 Ingress 层控制 */}}
+  {{- end }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: {{ .Values.pdb.minAvailable | default 1 }}
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}
+        service: {{ .Values.serviceType }}
+        {{- if .Values.canary.enabled }}
+        canary: "true"
+        version: {{ .Values.image.tag | quote }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ .Release.Name }}-sa
+      securityContext:
+        runAsUser: {{ .Values.security.runAsUser }}
+        runAsGroup: {{ .Values.security.runAsGroup }}
+        fsGroup: {{ .Values.security.fsGroup }}
+        runAsNonRoot: {{ .Values.security.runAsNonRoot }}
+      containers:
+        - name: {{ .Release.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secret
+                  key: database-url
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secret
+                  key: redis-url
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secret
+                  key: kafka-bootstrap-servers
+            - name: PORT
+              value: {{ .Values.env.PORT | quote }}
+          resources:
+            requests:
+              cpu: {{ .Values.resources.requests.cpu }}
+              memory: {{ .Values.resources.requests.memory }}
+            limits:
+              cpu: {{ .Values.resources.limits.cpu }}
+              memory: {{ .Values.resources.limits.memory }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.probe.liveness.path }}
+              port: {{ .Values.probe.liveness.port }}
+            initialDelaySeconds: {{ .Values.probe.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probe.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probe.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probe.liveness.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.probe.readiness.path }}
+              port: {{ .Values.probe.readiness.port }}
+            initialDelaySeconds: {{ .Values.probe.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probe.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probe.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probe.readiness.failureThreshold }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

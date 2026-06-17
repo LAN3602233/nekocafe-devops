@@ -1,0 +1,16 @@
+# ── 生产依赖 ──────────────────────────────────────────────────────────────
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+asyncpg==0.29.0
+redis[asyncio]==5.0.4
+pydantic==2.7.1
+kafka-python==2.0.2
+prometheus-client==0.20.0
+
+# ── 开发 / 测试依赖（仅 CI 阶段安装）────────────────────────────────────
+# 运行时不安装，Dockerfile 只拷贝此文件安装生产依赖；
+# CI 中使用 pip install -r requirements-dev.txt 安装以下内容：
+#   pytest>=8.0
+#   pytest-asyncio>=0.23
+#   httpx>=0.27          # FastAPI TestClient 依赖
+#   pytest-cov>=5.0
